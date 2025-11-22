@@ -1,6 +1,9 @@
 import serial
 import struct
 import rclpy
+import math
+import cv2 as cv
+import numpy as np
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Imu
@@ -28,6 +31,17 @@ rclpy.init()
 node = rclpy.create_node('arduino_imu')
 my_qos = QoSProfile(depth=40, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE)
 imu_pub = node.create_publisher(Imu, "imu", my_qos)
+
+cali_yml = cv.FileStorage('bmi270_mini_149.yml', cv.FileStorage_READ)
+acc_mis_align = cali_yml.getNode("acc_misalign").mat()
+acc_scale = cali_yml.getNode("acc_scale").mat()
+acc_bias = cali_yml.getNode("acc_bias").mat()
+acc_cor = acc_mis_align @ acc_scale
+gyro_mis_align = cali_yml.getNode("gyro_misalign").mat()
+gyro_scale = cali_yml.getNode("gyro_scale").mat()
+gyro_bias = cali_yml.getNode("gyro_bias").mat()
+gyro_cor = gyro_mis_align @ gyro_scale
+cali_yml.release()
 
 while True:
     try:
@@ -58,16 +72,29 @@ while True:
     # Unpack payload
     ts, xtr, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
     #print(f"ts={ts} xtr={xtr} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
+
+    acc_raw = np.array([ax, ay, az], dtype=float).reshape((3, 1))
+    acc_cali = acc_cor @ (acc_raw - acc_bias)
+    gyro_raw = np.array([gx, gy, gz], dtype=float).reshape((3, 1))
+    gyro_cali = gyro_cor @ (gyro_raw - gyro_bias)
+
     imu = Imu()
     imu.header.frame_id = "body"
     imu.header.stamp.sec = ts // 1_000_000
     imu.header.stamp.nanosec = (ts % 1_000_000) * 1000
-    imu.linear_acceleration.x = ax
-    imu.linear_acceleration.y = ay
-    imu.linear_acceleration.z = az
-    imu.angular_velocity.x = gx
-    imu.angular_velocity.y = gy
-    imu.angular_velocity.z = gz
+    #imu.linear_acceleration.x = acc_cali[0, 0] * 9.80665
+    #imu.linear_acceleration.y = acc_cali[1, 0] * 9.80665
+    #imu.linear_acceleration.z = acc_cali[2, 0] * 9.80665
+    #imu.angular_velocity.x = gyro_cali[0, 0] * math.pi / 180
+    #imu.angular_velocity.y = gyro_cali[1, 0] * math.pi / 180
+    #imu.angular_velocity.z = gyro_cali[2, 0] * math.pi / 180
+    imu.linear_acceleration.x = ax * 9.80665
+    imu.linear_acceleration.y = ay * 9.80665
+    imu.linear_acceleration.z = az * 9.80665
+    imu.angular_velocity.x = gx * math.pi / 180
+    imu.angular_velocity.y = gy * math.pi / 180
+    imu.angular_velocity.z = gz * math.pi / 180
+    imu.linear_acceleration_covariance[0] = xtr;
     imu_pub.publish(imu)
 
 ser.close()
