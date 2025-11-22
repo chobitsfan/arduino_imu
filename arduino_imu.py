@@ -35,8 +35,8 @@ trigger_pin.off()
 
 rclpy.init()
 node = rclpy.create_node('arduino_imu')
-imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=40, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
-ts_diff_pub = node.create_publisher(Int64, "ts_diff", QoSProfile(depth=2, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
+imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=10, durability=QoSDurabilityPolicy.VOLATILE))
+ts_diff_pub = node.create_publisher(Int64, "ts_diff", QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
 
 cali_yml = cv.FileStorage('bmi270_mini_149.yml', cv.FileStorage_READ)
 acc_mis_align = cali_yml.getNode("acc_misalign").mat()
@@ -83,31 +83,17 @@ while True:
     ts, sync_ts, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
     #print(f"ts={ts} sync_ts={sync_ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
 
-    cnt = cnt + 1
-    if cnt > 100:
-        cnt = 0
-        trigger_pin.on()
-        #now_ns = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
-        now_ns = time.clock_gettime_ns(time.CLOCK_BOOTTIME)
-        #now_ns = time.monotonic_ns()
-        trigger_pin.off()
-        #ts_diff = Int64()
-        #print(ts * 1000 - now_ns, ts, now_ns)
-        #ts_diff.data = ts * 1000 - now_ns
-        #ts_diff_pub.publish(ts_diff)
-
-    if now_ns > 0 and sync_ts > 0:
-        #print(sync_ts * 1000 - now_ns, sync_ts, now_ns)
-        #print(sync_ts // 1000 - now_ns // 1000000, "ms")
+    if sync_ts > 0:
         ts_diff = Int64()
-        ts_diff.data = sync_ts * 1000 - now_ns
+        ts_diff.data = sync_ts
         ts_diff_pub.publish(ts_diff)
-        now_ns = 0
 
     acc_raw = np.array([ax * 9.80665, ay * 9.80665, az * 9.80665], dtype=float).reshape((3, 1))
     acc_cali = acc_cor @ (acc_raw - acc_bias)
     gyro_raw = np.array([gx * math.pi / 180, gy * math.pi / 180, gz * math.pi / 180], dtype=float).reshape((3, 1))
     gyro_cali = gyro_cor @ (gyro_raw - gyro_bias)
+
+    #print(acc_cali[0,0],acc_cali[1,0], acc_cali[2,0], gyro_cali[0,0], gyro_cali[1,0], gyro_cali[2,0])
 
     imu = Imu()
     imu.header.frame_id = "body"
