@@ -9,7 +9,7 @@ from gpiozero import OutputDevice
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Imu
-from std_msgs.msg import Int64
+from multiprocessing import shared_memory
 
 ser = serial.Serial('/dev/ttyAMA1', 921600)
 
@@ -30,13 +30,14 @@ def crc16_ccitt(data: bytes):
                 crc = (crc << 1) & 0xFFFF
     return crc
 
+shm_ts = shared_memory.SharedMemory(name="my_imu_cam_sync", create=True, size=4)
+
 trigger_pin = OutputDevice(16)
 trigger_pin.off()
 
 rclpy.init()
 node = rclpy.create_node('arduino_imu')
-imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=10, durability=QoSDurabilityPolicy.VOLATILE))
-ts_diff_pub = node.create_publisher(Int64, "ts_diff", QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
+imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=20, durability=QoSDurabilityPolicy.VOLATILE))
 
 cali_yml = cv.FileStorage('bmi270_mini_149.yml', cv.FileStorage_READ)
 acc_mis_align = cali_yml.getNode("acc_misalign").mat()
@@ -84,9 +85,7 @@ while True:
     #print(f"ts={ts} sync_ts={sync_ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
 
     if sync_ts > 0:
-        ts_diff = Int64()
-        ts_diff.data = sync_ts
-        ts_diff_pub.publish(ts_diff)
+        struct.pack_into('=I', shm_ts.buf, 0, sync_ts)
 
     acc_raw = np.array([ax * 9.80665, ay * 9.80665, az * 9.80665], dtype=float).reshape((3, 1))
     acc_cali = acc_cor @ (acc_raw - acc_bias)
@@ -115,6 +114,8 @@ while True:
     imu_pub.publish(imu)
 
 ser.close()
+shm_ts.close()
+shm_ts.unlink()
 node.destroy_node()
 rclpy.try_shutdown()
 print("bye")
