@@ -14,7 +14,7 @@ from multiprocessing import shared_memory
 ser = serial.Serial('/dev/ttyAMA1', 921600)
 
 SOP = b'\xAA\x55'
-payload_fmt = "<IIffffff"
+payload_fmt = "<Iffffff"
 payload_size = struct.calcsize(payload_fmt)
 frame_size = 2 + payload_size + 2
 
@@ -81,11 +81,12 @@ while True:
         continue
 
     # Unpack payload
-    ts, sync_ts, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
+    ts, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
     #print(f"ts={ts} sync_ts={sync_ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
 
-    if sync_ts > 0:
-        struct.pack_into('=I', shm_ts.buf, 0, sync_ts)
+    if ax == 0 and gx == 0:
+        struct.pack_into('=I', shm_ts.buf, 0, ts)
+        continue
 
     acc_raw = np.array([ax * 9.80665, ay * 9.80665, az * 9.80665], dtype=float).reshape((3, 1))
     acc_cali = acc_cor @ (acc_raw - acc_bias)
