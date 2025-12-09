@@ -9,6 +9,7 @@ from gpiozero import OutputDevice
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Imu
+from std_msgs.msg import Int64
 from multiprocessing import shared_memory
 
 ser = serial.Serial('/dev/ttyAMA1', 921600)
@@ -38,6 +39,7 @@ trigger_pin.off()
 rclpy.init()
 node = rclpy.create_node('arduino_imu')
 imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=20, durability=QoSDurabilityPolicy.VOLATILE))
+t_offset_pub = node.create_publisher(Int64, "pico_pi_t_offset", QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
 
 cali_yml = cv.FileStorage('bmi270_mini_149.yml', cv.FileStorage_READ)
 acc_mis_align = cali_yml.getNode("acc_misalign").mat()
@@ -82,10 +84,18 @@ while True:
 
     # Unpack payload
     ts, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
-    #print(f"ts={ts} sync_ts={sync_ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
+    #print(f"ts={ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
 
     if ax == 0 and gx == 0:
         struct.pack_into('=I', shm_ts.buf, 0, ts)
+        continue
+
+    if now_ns > 0 and ax == 1 and gx == 1:
+        print(ts // 1000 - now_ns // 1000000, "ms", ts, now_ns)
+        t_off = Int64()
+        t_off.data = ts * 1000 - now_ns
+        t_offset_pub.publish(t_off)
+        now_ns = 0
         continue
 
     acc_raw = np.array([ax * 9.80665, ay * 9.80665, az * 9.80665], dtype=float).reshape((3, 1))
@@ -113,6 +123,13 @@ while True:
     #imu.angular_velocity.z = gz * math.pi / 180
     #imu.linear_acceleration_covariance[0] = xtr;
     imu_pub.publish(imu)
+
+    cnt = cnt + 1
+    if cnt > 777:
+        cnt = 0
+        trigger_pin.on()
+        now_ns = time.monotonic_ns()
+        trigger_pin.off()
 
 ser.close()
 shm_ts.close()
