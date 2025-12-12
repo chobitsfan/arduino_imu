@@ -17,7 +17,6 @@ ser = serial.Serial('/dev/ttyAMA1', 921600)
 SOP = b'\xAA\x55'
 payload_fmt = "<Iffffff"
 payload_size = struct.calcsize(payload_fmt)
-frame_size = 2 + payload_size + 2
 
 # CRC16-CCITT (0xFFFF)
 def crc16_ccitt(data: bytes):
@@ -54,16 +53,15 @@ cali_yml.release()
 
 cnt = 0
 now_ns = 0
+prv_imu_ts = 0
+prv_xtr_ts = 0
 ser.reset_input_buffer()
 
 while True:
     try:
         # Search for SOP
-        b = ser.read(1)
-        if b != b'\xAA':
-            continue
-        b2 = ser.read(1)
-        if b2 != b'\x55':
+        b2 = ser.read(2)
+        if b2 != b'\xAA\x55':
             continue
 
         # Read payload + CRC
@@ -88,15 +86,22 @@ while True:
 
     if ax == 0 and gx == 0:
         struct.pack_into('=I', shm_ts.buf, 0, ts)
+        if ts - prv_xtr_ts >= 55000:
+            print("miss xtr ts", prv_xtr_ts, ts, ts - prv_xtr_ts)
+        prv_xtr_ts = ts
         continue
 
-    if now_ns > 0 and ax == 1 and gx == 1:
-        print(ts // 1000 - now_ns // 1000000, "ms", ts, now_ns)
+    if now_ns > 0 and ax == 1 and ay == 0 and gx == 1:
+        #print(ts // 1000 - now_ns // 1000000, "ms", ts, now_ns)
         t_off = Int64()
         t_off.data = ts * 1000 - now_ns
         t_offset_pub.publish(t_off)
         now_ns = 0
         continue
+
+    if ts - prv_imu_ts >= 5500:
+        print("miss imu data", prv_imu_ts, ts, ts - prv_imu_ts)
+    prv_imu_ts = ts
 
     acc_raw = np.array([ax * 9.80665, ay * 9.80665, az * 9.80665], dtype=float).reshape((3, 1))
     acc_cali = acc_cor @ (acc_raw - acc_bias)
