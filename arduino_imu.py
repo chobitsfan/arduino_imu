@@ -12,7 +12,7 @@ from sensor_msgs.msg import Imu
 from std_msgs.msg import Int64
 from multiprocessing import shared_memory
 
-ser = serial.Serial('/dev/ttyAMA1', 921600)
+ser = serial.Serial('/dev/ttyAMA1', 921600, rtscts=True)
 
 SOP = b'\xAA\x55'
 payload_fmt = "<Iffffff"
@@ -60,8 +60,11 @@ ser.reset_input_buffer()
 while True:
     try:
         # Search for SOP
-        b2 = ser.read(2)
-        if b2 != b'\xAA\x55':
+        b = ser.read(1)
+        if b != b'\xAA':
+            continue
+        b2 = ser.read(1)
+        if b2 != b'\x55':
             continue
 
         # Read payload + CRC
@@ -84,14 +87,14 @@ while True:
     ts, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
     #print(f"ts={ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
 
-    if ax == 0 and gx == 0:
+    if ax == 0 and ay == 0 and gx == 0:
         struct.pack_into('=I', shm_ts.buf, 0, ts)
         if ts - prv_xtr_ts >= 55000:
             print("miss xtr ts", prv_xtr_ts, ts, ts - prv_xtr_ts)
         prv_xtr_ts = ts
         continue
 
-    if now_ns > 0 and ax == 1 and ay == 0 and gx == 1:
+    if now_ns > 0 and ax == 1 and ay == 1 and gx == 1:
         #print(ts // 1000 - now_ns // 1000000, "ms", ts, now_ns)
         t_off = Int64()
         t_off.data = ts * 1000 - now_ns
