@@ -5,12 +5,13 @@ import math
 import cv2 as cv
 import numpy as np
 import time
+#import os
 from gpiozero import OutputDevice
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
-from sensor_msgs.msg import Imu
+from sensor_msgs.msg import Imu, Image
 from std_msgs.msg import Int64
-from multiprocessing import shared_memory
+#from multiprocessing import shared_memory
 
 ser = serial.Serial('/dev/ttyAMA1', 921600, rtscts=True)
 
@@ -30,7 +31,12 @@ def crc16_ccitt(data: bytes):
                 crc = (crc << 1) & 0xFFFF
     return crc
 
-shm_ts = shared_memory.SharedMemory(name="my_imu_cam_sync", create=True, size=4)
+#shm_ts = shared_memory.SharedMemory(name="my_imu_cam_sync", create=True, size=4)
+#fifo_path = "/tmp/my_cam_ts_fifo"
+#if not os.path.exists(fifo_path):
+#    os.mkfifo(fifo_path)
+#print("opening fifo")
+#fifo = open(fifo_path, "wb", buffering=0)
 
 trigger_pin = OutputDevice(16)
 trigger_pin.off()
@@ -39,6 +45,7 @@ rclpy.init()
 node = rclpy.create_node('arduino_imu')
 imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=20, durability=QoSDurabilityPolicy.VOLATILE))
 t_offset_pub = node.create_publisher(Int64, "pico_pi_t_offset", QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
+cam_sync_pub = node.create_publisher(Image, "cam_sync", QoSProfile(depth=5, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
 
 cali_yml = cv.FileStorage('bmi270_mini_149.yml', cv.FileStorage_READ)
 acc_mis_align = cali_yml.getNode("acc_misalign").mat()
@@ -51,11 +58,17 @@ gyro_bias = cali_yml.getNode("gyro_bias").mat()
 gyro_cor = gyro_mis_align @ gyro_scale
 cali_yml.release()
 
-cnt = 0
-now_ns = 0
+time.monotonic_ns()
+cnt = 787
+sync_ts = 0
 prv_imu_ts = 0
 prv_xtr_ts = 0
+prv_xtr_pi_ts = 0
+pico_pi_t_offset_ns = 0
+
 ser.reset_input_buffer()
+
+print("start")
 
 while True:
     try:
@@ -88,21 +101,37 @@ while True:
     #print(f"ts={ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
 
     if ax == 0 and ay == 0 and gx == 0:
-        struct.pack_into('=I', shm_ts.buf, 0, ts)
-        if ts - prv_xtr_ts >= 55000:
+        #struct.pack_into('@I', shm_ts.buf, 0, ts)
+        #fifo.write(struct.pack("@I", ts))
+        #print(ts)
+        pi_cam_ts = (ts + int(az)) * 1000 - pico_pi_t_offset_ns
+        sync_msg = Image()
+        sync_msg.header.frame_id = "body"
+        sync_msg.header.stamp.sec = pi_cam_ts // 1_000_000_000
+        sync_msg.header.stamp.nanosec = pi_cam_ts % 1_000_000_000
+        sync_msg.height = ts + int(az) // 2
+        cam_sync_pub.publish(sync_msg)
+        if prv_xtr_ts > 0 and ts - prv_xtr_ts >= 55000:
             print("miss xtr ts", prv_xtr_ts, ts, ts - prv_xtr_ts)
+        #now_ns = time.monotonic_ns()
+        #print(ts - prv_xtr_ts, now_ns - prv_xtr_pi_ts)
+        #prv_xtr_pi_ts = now_ns
         prv_xtr_ts = ts
         continue
 
-    if now_ns > 0 and ax == 1 and ay == 1 and gx == 1:
-        #print(ts // 1000 - now_ns // 1000000, "ms", ts, now_ns)
+    if sync_ts > 0 and ax == 1 and ay == 1 and gx == 1:
+        pico_pi_t_offset_ns = ts * 1000 - sync_ts
         t_off = Int64()
-        t_off.data = ts * 1000 - now_ns
+        t_off.data = pico_pi_t_offset_ns
         t_offset_pub.publish(t_off)
-        now_ns = 0
+        sync_ts = 0
         continue
 
-    if ts - prv_imu_ts >= 5500:
+    if ax == 2 and ay == 2 and gx == 2:
+        #print("pico", ts)
+        continue
+
+    if prv_imu_ts > 0 and ts - prv_imu_ts >= 5500:
         print("miss imu data", prv_imu_ts, ts, ts - prv_imu_ts)
     prv_imu_ts = ts
 
@@ -133,15 +162,16 @@ while True:
     imu_pub.publish(imu)
 
     cnt = cnt + 1
-    if cnt > 777:
+    if cnt > 787:
         cnt = 0
         trigger_pin.on()
-        now_ns = time.monotonic_ns()
+        sync_ts = time.monotonic_ns()
         trigger_pin.off()
 
 ser.close()
-shm_ts.close()
-shm_ts.unlink()
+#shm_ts.close()
+#shm_ts.unlink()
+#fifo.close()
 node.destroy_node()
 rclpy.try_shutdown()
 print("bye")
