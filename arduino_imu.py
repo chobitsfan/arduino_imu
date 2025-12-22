@@ -16,7 +16,7 @@ from std_msgs.msg import Int64
 ser = serial.Serial('/dev/ttyAMA1', 921600, rtscts=True)
 
 SOP = b'\xAA\x55'
-payload_fmt = "<Iffffff"
+payload_fmt = "<Ihhhhhh"
 payload_size = struct.calcsize(payload_fmt)
 
 # CRC16-CCITT (0xFFFF)
@@ -46,6 +46,9 @@ node = rclpy.create_node('arduino_imu')
 imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=20, durability=QoSDurabilityPolicy.VOLATILE))
 t_offset_pub = node.create_publisher(Int64, "pico_pi_t_offset", QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
 cam_sync_pub = node.create_publisher(Image, "cam_sync", QoSProfile(depth=5, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
+
+acc_raw_to_ms = (2 << 2) / 32768.0 * 9.80665
+gyro_raw_to_rad_sec = (125 * (1 << 4)) / 32768.0 * math.pi / 180
 
 cali_yml = cv.FileStorage('bmi270_mini_149.yml', cv.FileStorage_READ)
 acc_mis_align = cali_yml.getNode("acc_misalign").mat()
@@ -135,9 +138,9 @@ while True:
         print("miss imu data", prv_imu_ts, ts, ts - prv_imu_ts)
     prv_imu_ts = ts
 
-    acc_raw = np.array([ax * 9.80665, ay * 9.80665, az * 9.80665], dtype=float).reshape((3, 1))
+    acc_raw = np.array([ax * acc_raw_to_ms, ay * acc_raw_to_ms, az * acc_raw_to_ms], dtype=float).reshape((3, 1))
     acc_cali = acc_cor @ (acc_raw - acc_bias)
-    gyro_raw = np.array([gx * math.pi / 180, gy * math.pi / 180, gz * math.pi / 180], dtype=float).reshape((3, 1))
+    gyro_raw = np.array([gx * gyro_raw_to_rad_sec, gy * gyro_raw_to_rad_sec, gz * gyro_raw_to_rad_sec], dtype=float).reshape((3, 1))
     gyro_cali = gyro_cor @ (gyro_raw - gyro_bias)
 
     #print(acc_cali[0,0],acc_cali[1,0], acc_cali[2,0], gyro_cali[0,0], gyro_cali[1,0], gyro_cali[2,0])
