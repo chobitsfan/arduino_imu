@@ -5,13 +5,11 @@ import math
 import cv2 as cv
 import numpy as np
 import time
-#import os
 from gpiozero import OutputDevice
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Imu, Image
 from std_msgs.msg import Int64
-#from multiprocessing import shared_memory
 
 ser = serial.Serial('/dev/ttyAMA1', 921600, rtscts=True)
 
@@ -30,13 +28,6 @@ def crc16_ccitt(data: bytes):
             else:
                 crc = (crc << 1) & 0xFFFF
     return crc
-
-#shm_ts = shared_memory.SharedMemory(name="my_imu_cam_sync", create=True, size=4)
-#fifo_path = "/tmp/my_cam_ts_fifo"
-#if not os.path.exists(fifo_path):
-#    os.mkfifo(fifo_path)
-#print("opening fifo")
-#fifo = open(fifo_path, "wb", buffering=0)
 
 trigger_pin = OutputDevice(16)
 trigger_pin.off()
@@ -104,9 +95,6 @@ while True:
     #print(f"ts={ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
 
     if ax == 0 and ay == 0 and gx == 0:
-        #struct.pack_into('@I', shm_ts.buf, 0, ts)
-        #fifo.write(struct.pack("@I", ts))
-        #print(ts)
         pi_cam_ts = (ts + int(az)) * 1000 - pico_pi_t_offset_ns
         sync_msg = Image()
         sync_msg.header.frame_id = "body"
@@ -116,9 +104,6 @@ while True:
         cam_sync_pub.publish(sync_msg)
         if prv_xtr_ts > 0 and ts - prv_xtr_ts >= 55000:
             print("miss xtr ts", prv_xtr_ts, ts, ts - prv_xtr_ts)
-        #now_ns = time.monotonic_ns()
-        #print(ts - prv_xtr_ts, now_ns - prv_xtr_pi_ts)
-        #prv_xtr_pi_ts = now_ns
         prv_xtr_ts = ts
         continue
 
@@ -155,13 +140,6 @@ while True:
     imu.angular_velocity.x = gyro_cali[0, 0]
     imu.angular_velocity.y = gyro_cali[1, 0]
     imu.angular_velocity.z = gyro_cali[2, 0]
-    #imu.linear_acceleration.x = ax * 9.80665
-    #imu.linear_acceleration.y = ay * 9.80665
-    #imu.linear_acceleration.z = az * 9.80665
-    #imu.angular_velocity.x = gx * math.pi / 180
-    #imu.angular_velocity.y = gy * math.pi / 180
-    #imu.angular_velocity.z = gz * math.pi / 180
-    #imu.linear_acceleration_covariance[0] = xtr;
     imu_pub.publish(imu)
 
     cnt = cnt + 1
@@ -172,9 +150,6 @@ while True:
         trigger_pin.off()
 
 ser.close()
-#shm_ts.close()
-#shm_ts.unlink()
-#fifo.close()
 node.destroy_node()
 rclpy.try_shutdown()
 print("bye")
