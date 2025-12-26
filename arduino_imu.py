@@ -14,7 +14,7 @@ from std_msgs.msg import Int64
 ser = serial.Serial('/dev/ttyAMA1', 921600, rtscts=True)
 
 SOP = b'\xAA\x55'
-payload_fmt = "<IHhhhhhh"
+payload_fmt = "<IHHhhhhhh"
 payload_size = struct.calcsize(payload_fmt)
 
 # CRC16-CCITT (0xFFFF)
@@ -56,8 +56,7 @@ time.monotonic_ns()
 cnt = 787
 sync_ts = 0
 prv_imu_ts = 0
-prv_xtr_ts = 0
-prv_xtr_pi_ts = 0
+prv_seq = -1
 pico_pi_t_offset_ns = 0
 
 ser.reset_input_buffer()
@@ -91,8 +90,12 @@ while True:
         continue
 
     # Unpack payload
-    ts, exp_us, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
+    ts, exp_us, seq, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
     #print(f"ts={ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
+
+    if prv_seq != -1 and seq - prv_seq > 1 and seq - prv_seq != -65535:
+        print("miss msg", prv_seq, seq)
+    prv_seq = seq
 
     if ax == 0 and ay == 0 and gx == 0: # this is a cam trigger timestamp msg
         pi_cam_ts = (ts + exp_us) * 1000 - pico_pi_t_offset_ns
@@ -103,9 +106,6 @@ while True:
         sync_msg.header.stamp.nanosec = pi_cam_ts % 1_000_000_000
         sync_msg.height = ts + exp_us // 2
         cam_sync_pub.publish(sync_msg)
-        if prv_xtr_ts > 0 and ts - prv_xtr_ts >= 55000:
-            print("miss xtr ts", prv_xtr_ts, ts, ts - prv_xtr_ts)
-        prv_xtr_ts = ts
         continue
 
     if sync_ts > 0 and ax == 1 and ay == 1 and gx == 1:
