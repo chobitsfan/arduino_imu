@@ -34,7 +34,7 @@ trigger_pin.off()
 
 rclpy.init()
 node = rclpy.create_node('arduino_imu')
-imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=20, durability=QoSDurabilityPolicy.VOLATILE))
+imu_pub = node.create_publisher(Imu, "imu", QoSProfile(depth=200, durability=QoSDurabilityPolicy.VOLATILE))
 t_offset_pub = node.create_publisher(Int64, "pico_pi_t_offset", QoSProfile(depth=1, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
 cam_sync_pub = node.create_publisher(Image, "cam_sync", QoSProfile(depth=5, reliability=QoSReliabilityPolicy.BEST_EFFORT, durability=QoSDurabilityPolicy.VOLATILE))
 
@@ -91,7 +91,7 @@ while True:
 
     # Unpack payload
     ts, exp_us, seq, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
-    #print(f"ts={ts} ax={ax:.3f} ay={ay:.3f} az={az:.3f} gx={gx:.3f} gy={gy:.3f} gz={gz:.3f}")
+    #print(ts, seq, ax, ay, az, gx, gy, gz)
 
     if prv_seq != -1 and seq - prv_seq > 1 and seq - prv_seq != -65535:
         print("miss msg", prv_seq, seq)
