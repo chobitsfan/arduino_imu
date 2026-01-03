@@ -5,16 +5,21 @@ import math
 import cv2 as cv
 import numpy as np
 import time
+import sys
 from gpiozero import OutputDevice
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, QoSReliabilityPolicy, QoSDurabilityPolicy
 from sensor_msgs.msg import Imu, Image
 from std_msgs.msg import Int64
 
+if len(sys.argv) < 2:
+    print("need imu calibration file\n")
+    quit()
+
 ser = serial.Serial('/dev/ttyAMA1', 921600, rtscts=True)
 
 SOP = b'\xAA\x55'
-payload_fmt = "<IHHhhhhhh"
+payload_fmt = "<QBbhhhhhhH"
 payload_size = struct.calcsize(payload_fmt)
 
 # CRC16-CCITT (0xFFFF)
@@ -41,7 +46,7 @@ cam_sync_pub = node.create_publisher(Image, "cam_sync", QoSProfile(depth=5, reli
 acc_raw_to_ms = (2 << 2) / 32768.0 * 9.80665
 gyro_raw_to_rad_sec = (125 * (1 << 4)) / 32768.0 * math.pi / 180
 
-cali_yml = cv.FileStorage('bmi270_mini_149.yml', cv.FileStorage_READ)
+cali_yml = cv.FileStorage(sys.argv[1], cv.FileStorage_READ)
 acc_mis_align = cali_yml.getNode("acc_misalign").mat()
 acc_scale = cali_yml.getNode("acc_scale").mat()
 acc_bias = cali_yml.getNode("acc_bias").mat()
@@ -60,6 +65,10 @@ prv_seq = -1
 pico_pi_t_offset_ns = 0
 
 ser.reset_input_buffer()
+
+#acc_log = open("bmi270_acc.csv", "w")
+#gyro_log = open("bmi270_gyro.csv", "w")
+#acc_gyro_log = open("bmi270_acc_gyro.csv", "w")
 
 print("start")
 
@@ -90,14 +99,14 @@ while True:
         continue
 
     # Unpack payload
-    ts, exp_us, seq, ax, ay, az, gx, gy, gz = struct.unpack(payload_fmt, payload)
+    ts, seq, msg_type, ax, ay, az, gx, gy, gz, exp_us = struct.unpack(payload_fmt, payload)
     #print(ts, seq, ax, ay, az, gx, gy, gz)
 
-    if prv_seq != -1 and seq - prv_seq > 1 and seq - prv_seq != -65535:
+    if prv_seq != -1 and (seq - prv_seq > 1 or (prv_seq == 255 and seq != 0)):
         print("miss msg", prv_seq, seq)
     prv_seq = seq
 
-    if ax == 0 and ay == 0 and gx == 0: # this is a cam trigger timestamp msg
+    if msg_type == 1: # this is a cam trigger timestamp msg
         pi_cam_ts = (ts + exp_us) * 1000 - pico_pi_t_offset_ns
         # I use Image to send camera image timestamp, this is ugly, but I am too lazy to use custom msg
         sync_msg = Image()
@@ -108,7 +117,7 @@ while True:
         cam_sync_pub.publish(sync_msg)
         continue
 
-    if sync_ts > 0 and ax == 1 and ay == 1 and gx == 1:
+    if sync_ts > 0 and msg_type == 2:
         pico_pi_t_offset_ns = ts * 1000 - sync_ts
         t_off = Int64()
         t_off.data = pico_pi_t_offset_ns
@@ -116,13 +125,12 @@ while True:
         sync_ts = 0
         continue
 
-    if ax == 2 and ay == 2 and gx == 2:
-        #print("pico", ts)
-        continue
-
     if prv_imu_ts > 0 and ts - prv_imu_ts >= 5500:
         print("miss imu data", prv_imu_ts, ts, ts - prv_imu_ts)
     prv_imu_ts = ts
+
+    #acc_log.write(f"{ts} {(ax * acc_raw_to_ms):.15f} {(ay * acc_raw_to_ms):.15f} {(az * acc_raw_to_ms):.15f}\n")
+    #gyro_log.write(f"{ts} {(gx * gyro_raw_to_rad_sec):.15f} {(gy * gyro_raw_to_rad_sec):.15f} {(gz * gyro_raw_to_rad_sec):.15f}\n")
 
     acc_raw = np.array([ax * acc_raw_to_ms, ay * acc_raw_to_ms, az * acc_raw_to_ms], dtype=float).reshape((3, 1))
     acc_cali = acc_cor @ (acc_raw - acc_bias)
@@ -130,6 +138,7 @@ while True:
     gyro_cali = gyro_cor @ (gyro_raw - gyro_bias)
 
     #print(acc_cali[0,0],acc_cali[1,0], acc_cali[2,0], gyro_cali[0,0], gyro_cali[1,0], gyro_cali[2,0])
+    #acc_gyro_log.write(f"{ts},{acc_cali[0,0]:.15f},{acc_cali[1,0]:.15f},{acc_cali[2,0]:.15f},{gyro_cali[0,0]:.15f},{gyro_cali[1,0]:.15f},{gyro_cali[2,0]:.15f}\n")
 
     imu = Imu()
     imu.header.frame_id = "body"
@@ -150,6 +159,9 @@ while True:
         sync_ts = time.monotonic_ns()
         trigger_pin.off()
 
+#acc_log.close()
+#gyro_log.close()
+#acc_gyro_log.close()
 ser.close()
 node.destroy_node()
 rclpy.try_shutdown()
