@@ -16,11 +16,10 @@ if len(sys.argv) < 2:
     print("need imu calibration file\n")
     quit()
 
-ser = serial.Serial('/dev/ttyAMA1', 921600)
-
 SOP = b'\xAA\x55'
-payload_fmt = "<QBbhhhhhhH"
-payload_size = struct.calcsize(payload_fmt)
+PAYLOAD_FMT = "<QBbhhhhhhH"
+PAYLOAD_SIZE = struct.calcsize(PAYLOAD_FMT)
+PACKET_SIZE = PAYLOAD_SIZE + 4
 
 # CRC16-CCITT (0xFFFF)
 def crc16_ccitt(data: bytes):
@@ -57,14 +56,13 @@ gyro_bias = cali_yml.getNode("gyro_bias").mat()
 gyro_cor = gyro_mis_align @ gyro_scale
 cali_yml.release()
 
-time.monotonic_ns()
-cnt = 787
+time.monotonic_ns() # warm up time module
+cnt = 787 # pick a prime number
 sync_ts = 0
 prv_imu_ts = 0
 prv_seq = -1
 pico_pi_t_offset_ns = 0
-
-ser.reset_input_buffer()
+buffer = bytearray()
 
 #acc_log = open("bmi270_acc.csv", "w")
 #gyro_log = open("bmi270_gyro.csv", "w")
@@ -72,97 +70,101 @@ ser.reset_input_buffer()
 
 print("start")
 
-while True:
+with serial.Serial('/dev/ttyAMA1', 921600, timeout=0.002) as ser:
     try:
-        # Search for SOP
-        b = ser.read(1)
-        if b != b'\xAA':
-            continue
-        b2 = ser.read(1)
-        if b2 != b'\x55':
-            continue
+        while True:
+            # 1. Bulk read to avoid 'read(1)' overhead
+            data = ser.read(PACKET_SIZE)
+            if len(data) > 0:
+                buffer.extend(data)
 
-        # Read payload + CRC
-        frame = ser.read(payload_size + 2)
-        if len(frame) != payload_size + 2:
-            continue
+                # 2. Find the Start of Packet
+                sop_index = buffer.find(SOP)
+
+                if sop_index != -1:
+                    # Check if we have enough bytes for a full packet
+                    if len(buffer) >= sop_index + PACKET_SIZE:
+                        # 3. Slice out the potential packet
+                        packet = buffer[sop_index : sop_index + PACKET_SIZE]
+
+                        # 4. Separate Payload and CRC
+                        payload = packet[2:PAYLOAD_SIZE+2]
+                        received_crc = (packet[PAYLOAD_SIZE+2] << 8) | packet[PAYLOAD_SIZE+2+1]
+
+                        # 5. Verify Integrity
+                        if crc16_ccitt(payload) == received_crc:
+                            ts, seq, msg_type, ax, ay, az, gx, gy, gz, exp_us = struct.unpack(PAYLOAD_FMT, payload)
+
+                            if prv_seq != -1 and (seq - prv_seq > 1 or (prv_seq == 255 and seq != 0)):
+                                print("miss msg", prv_seq, seq)
+                            prv_seq = seq
+
+                            if msg_type == 0:
+                                if prv_imu_ts > 0 and ts - prv_imu_ts >= 5500:
+                                    print("miss imu data", prv_imu_ts, ts, ts - prv_imu_ts)
+                                prv_imu_ts = ts
+
+                                #acc_log.write(f"{ts} {(ax * acc_raw_to_ms):.15f} {(ay * acc_raw_to_ms):.15f} {(az * acc_raw_to_ms):.15f}\n")
+                                #gyro_log.write(f"{ts} {(gx * gyro_raw_to_rad_sec):.15f} {(gy * gyro_raw_to_rad_sec):.15f} {(gz * gyro_raw_to_rad_sec):.15f}\n")
+
+                                acc_raw = np.array([ax * acc_raw_to_ms, ay * acc_raw_to_ms, az * acc_raw_to_ms], dtype=float).reshape((3, 1))
+                                acc_cali = acc_cor @ (acc_raw - acc_bias)
+                                gyro_raw = np.array([gx * gyro_raw_to_rad_sec, gy * gyro_raw_to_rad_sec, gz * gyro_raw_to_rad_sec], dtype=float).reshape((3, 1))
+                                gyro_cali = gyro_cor @ (gyro_raw - gyro_bias)
+
+                                #acc_gyro_log.write(f"{ts},{acc_cali[0,0]:.15f},{acc_cali[1,0]:.15f},{acc_cali[2,0]:.15f},{gyro_cali[0,0]:.15f},{gyro_cali[1,0]:.15f},{gyro_cali[2,0]:.15f}\n")
+
+                                imu = Imu()
+                                imu.header.frame_id = "body"
+                                imu.header.stamp.sec = ts // 1_000_000
+                                imu.header.stamp.nanosec = (ts % 1_000_000) * 1000
+                                imu.linear_acceleration.x = acc_cali[0, 0]
+                                imu.linear_acceleration.y = acc_cali[1, 0]
+                                imu.linear_acceleration.z = acc_cali[2, 0]
+                                imu.angular_velocity.x = gyro_cali[0, 0]
+                                imu.angular_velocity.y = gyro_cali[1, 0]
+                                imu.angular_velocity.z = gyro_cali[2, 0]
+                                imu_pub.publish(imu)
+                            elif msg_type == 1: # this is a cam trigger timestamp msg
+                                pi_cam_ts = (ts + exp_us) * 1000 - pico_pi_t_offset_ns
+                                # I use Image to send camera image timestamp, this is ugly, but I am too lazy to use custom msg
+                                sync_msg = Image()
+                                sync_msg.header.frame_id = "body"
+                                sync_msg.header.stamp.sec = pi_cam_ts // 1_000_000_000
+                                sync_msg.header.stamp.nanosec = pi_cam_ts % 1_000_000_000
+                                sync_msg.height = ts + exp_us // 2
+                                cam_sync_pub.publish(sync_msg)
+                            elif msg_type == 2 and sync_ts > 0:
+                                pico_pi_t_offset_ns = ts * 1000 - sync_ts
+                                t_off = Int64()
+                                t_off.data = pico_pi_t_offset_ns
+                                t_offset_pub.publish(t_off)
+                                sync_ts = 0
+
+                            cnt = cnt + 1
+                            if cnt > 787:
+                                cnt = 0
+                                trigger_pin.on()
+                                sync_ts = time.monotonic_ns()
+                                trigger_pin.off()
+
+                            # Remove processed packet AND any garbage before it
+                            del buffer[:sop_index + PACKET_SIZE]
+                        else:
+                            # CRC FAILED: Skip this SOP and keep hunting
+                            # Remove just the bad SOP to find the next one
+                            print("CRC mismatch - skipping bytes")
+                            del buffer[:sop_index + 1]
+                    else:
+                        # Packet incomplete, wait for more data
+                        pass
+                else:
+                    # No SOP found, but buffer is growing? Clear old data.
+                    if len(buffer) > 1024:
+                        buffer.clear()
     except KeyboardInterrupt:
-        break
+        pass
 
-    payload = frame[:payload_size]
-    crc_recv = (frame[payload_size] << 8) | frame[payload_size+1]
-
-    # Verify CRC
-    crc_calc = crc16_ccitt(payload)
-    if crc_recv != crc_calc:
-        print("CRC ERROR")
-        continue
-
-    # Unpack payload
-    ts, seq, msg_type, ax, ay, az, gx, gy, gz, exp_us = struct.unpack(payload_fmt, payload)
-    #print(ts, seq, ax, ay, az, gx, gy, gz)
-
-    if prv_seq != -1 and (seq - prv_seq > 1 or (prv_seq == 255 and seq != 0)):
-        print("miss msg", prv_seq, seq)
-    prv_seq = seq
-
-    if msg_type == 1: # this is a cam trigger timestamp msg
-        pi_cam_ts = (ts + exp_us) * 1000 - pico_pi_t_offset_ns
-        # I use Image to send camera image timestamp, this is ugly, but I am too lazy to use custom msg
-        sync_msg = Image()
-        sync_msg.header.frame_id = "body"
-        sync_msg.header.stamp.sec = pi_cam_ts // 1_000_000_000
-        sync_msg.header.stamp.nanosec = pi_cam_ts % 1_000_000_000
-        sync_msg.height = ts + exp_us // 2
-        cam_sync_pub.publish(sync_msg)
-        continue
-
-    if sync_ts > 0 and msg_type == 2:
-        pico_pi_t_offset_ns = ts * 1000 - sync_ts
-        t_off = Int64()
-        t_off.data = pico_pi_t_offset_ns
-        t_offset_pub.publish(t_off)
-        sync_ts = 0
-        continue
-
-    if prv_imu_ts > 0 and ts - prv_imu_ts >= 5500:
-        print("miss imu data", prv_imu_ts, ts, ts - prv_imu_ts)
-    prv_imu_ts = ts
-
-    #acc_log.write(f"{ts} {(ax * acc_raw_to_ms):.15f} {(ay * acc_raw_to_ms):.15f} {(az * acc_raw_to_ms):.15f}\n")
-    #gyro_log.write(f"{ts} {(gx * gyro_raw_to_rad_sec):.15f} {(gy * gyro_raw_to_rad_sec):.15f} {(gz * gyro_raw_to_rad_sec):.15f}\n")
-
-    acc_raw = np.array([ax * acc_raw_to_ms, ay * acc_raw_to_ms, az * acc_raw_to_ms], dtype=float).reshape((3, 1))
-    acc_cali = acc_cor @ (acc_raw - acc_bias)
-    gyro_raw = np.array([gx * gyro_raw_to_rad_sec, gy * gyro_raw_to_rad_sec, gz * gyro_raw_to_rad_sec], dtype=float).reshape((3, 1))
-    gyro_cali = gyro_cor @ (gyro_raw - gyro_bias)
-
-    #print(acc_cali[0,0],acc_cali[1,0], acc_cali[2,0], gyro_cali[0,0], gyro_cali[1,0], gyro_cali[2,0])
-    #acc_gyro_log.write(f"{ts},{acc_cali[0,0]:.15f},{acc_cali[1,0]:.15f},{acc_cali[2,0]:.15f},{gyro_cali[0,0]:.15f},{gyro_cali[1,0]:.15f},{gyro_cali[2,0]:.15f}\n")
-
-    imu = Imu()
-    imu.header.frame_id = "body"
-    imu.header.stamp.sec = ts // 1_000_000
-    imu.header.stamp.nanosec = (ts % 1_000_000) * 1000
-    imu.linear_acceleration.x = acc_cali[0, 0]
-    imu.linear_acceleration.y = acc_cali[1, 0]
-    imu.linear_acceleration.z = acc_cali[2, 0]
-    imu.angular_velocity.x = gyro_cali[0, 0]
-    imu.angular_velocity.y = gyro_cali[1, 0]
-    imu.angular_velocity.z = gyro_cali[2, 0]
-    imu_pub.publish(imu)
-
-    cnt = cnt + 1
-    if cnt > 787:
-        cnt = 0
-        trigger_pin.on()
-        sync_ts = time.monotonic_ns()
-        trigger_pin.off()
-
-#acc_log.close()
-#gyro_log.close()
-#acc_gyro_log.close()
-ser.close()
 node.destroy_node()
 rclpy.try_shutdown()
 print("bye")
