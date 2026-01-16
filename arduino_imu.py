@@ -16,7 +16,7 @@ if len(sys.argv) < 2:
     print("need imu calibration file\n")
     quit()
 
-ser = serial.Serial('/dev/ttyAMA1', 921600, rtscts=True)
+ser = serial.Serial('/dev/ttyAMA1', 921600)
 
 SOP = b'\xAA\x55'
 payload_fmt = "<QBbhhhhhhH"
